@@ -171,3 +171,4 @@ func TestStateTrackerConcurrentAccess(t *testing.T) {
 	_ = st.RunningCount()
 	_ = st.FailedCount()
 }
+
