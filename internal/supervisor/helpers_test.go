@@ -16,3 +16,5 @@ func testFailingCommand() (string, []string) {
 	return "sh", []string{"-c", "exit 1"}
 } 
 
+
+
