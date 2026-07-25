@@ -49,3 +49,119 @@ func (w *Worker) Status() ProcessStatus {
 	defer w.mu.RUnlock()
 	return w.status
 }
+
+// Run ejecuta el ciclo de supervisión hasta stopped, failed o cancelación del contexto.
+func (w *Worker) Run(ctx context.Context) {
+	name := w.runner.Name()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			w.setState(StateStopped)
+			log.Printf("[%s] supervisión detenida: %v", name, err)
+			return
+		}
+
+		w.setState(StateRunning)
+		log.Printf("[%s] arrancando: %s", name, w.runner.Config().Command)
+		result := w.runner.RunOnce(ctx)
+		w.setLastExitCode(result.ExitCode)
+
+		if errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded) {
+			w.setState(StateStopped)
+			log.Printf("[%s] ejecución cancelada por contexto", name)
+			return
+		}
+
+		success := result.ExitCode == 0 && result.Err == nil
+		if success {
+			w.backoff.OnSuccess()
+			w.resetConsecutiveFailures()
+			log.Printf("[%s] terminó correctamente (código=0)", name)
+		} else {
+			w.backoff.OnFailure()
+			failures := w.incrementConsecutiveFailures()
+			log.Printf("[%s] terminó con código=%d: %v", name, result.ExitCode, result.Err)
+
+			if w.maxRetries > 0 && failures > w.maxRetries {
+				w.setState(StateFailed)
+				log.Printf("[%s] estado failed: superó max_retries=%d", name, w.maxRetries)
+				return
+			}
+		}
+
+		if !shouldRestart(w.policy, result) {
+			w.setState(StateStopped)
+			log.Printf("[%s] no se reinicia (política=%s)", name, w.policy)
+			return
+		}
+
+		delay := w.backoff.Delay()
+		w.setState(StateBackoff)
+		log.Printf("[%s] backoff %s antes de reiniciar (política=%s)", name, delay, w.policy)
+
+		if !w.waitBackoff(ctx, delay) {
+			w.setState(StateStopped)
+			log.Printf("[%s] backoff interrumpido por contexto", name)
+			return
+		}
+
+		w.incrementRestartCount()
+		log.Printf("[%s] reiniciando tras backoff", name)
+	}
+}
+
+func (w *Worker) waitBackoff(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (w *Worker) setState(state State) {
+	w.mu.Lock()
+	w.status.State = state
+	w.mu.Unlock()
+}
+
+func (w *Worker) setLastExitCode(code int) {
+	w.mu.Lock()
+	w.status.LastExitCode = code
+	w.mu.Unlock()
+}
+
+func (w *Worker) incrementRestartCount() {
+	w.mu.Lock()
+	w.status.RestartCount++
+	w.mu.Unlock()
+}
+
+func (w *Worker) incrementConsecutiveFailures() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.status.ConsecutiveFailures++
+	return w.status.ConsecutiveFailures
+}
+
+func (w *Worker) resetConsecutiveFailures() {
+	w.mu.Lock()
+	w.status.ConsecutiveFailures = 0
+	w.mu.Unlock()
+}
+
+func shouldRestart(policy config.RestartPolicy, result process.RunResult) bool {
+	switch policy {
+	case config.RestartAlways:
+		return true
+	case config.RestartOnFailure:
+		return result.ExitCode != 0
+	case config.RestartNever:
+		return false
+	default:
+		return false
+	}
+}
