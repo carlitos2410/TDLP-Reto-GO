@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -116,4 +117,31 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+const defaultGracePeriodSeconds = 10.0
+
+// GracePeriodDuration retorna el periodo de gracia como time.Duration.
+// Si GracePeriodSeconds es 0 o negativo, retorna 10 segundos por defecto.
+func (c *Config) GracePeriodDuration() time.Duration {
+	secs := c.GracePeriodSeconds
+	if secs <= 0 {
+		secs = defaultGracePeriodSeconds
+	}
+	return time.Duration(secs * float64(time.Second))
+}
+
+// ShouldRestart determina si un proceso debe reiniciarse según su política
+// y el número de reintentos realizados.
+func (c *ProcessConfig) ShouldRestart(retries int) bool {
+	switch c.RestartPolicy {
+	case RestartAlways:
+		return c.MaxRetries <= 0 || retries < c.MaxRetries
+	case RestartOnFailure:
+		return c.MaxRetries <= 0 || retries < c.MaxRetries
+	case RestartNever:
+		return false
+	default:
+		return false
+	}
 }
