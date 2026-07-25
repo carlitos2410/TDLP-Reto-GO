@@ -141,3 +141,40 @@ func (st *StateTracker) GetAll() map[string]ProcessInfo {
 	}
 	return out
 }
+
+// Summary retorna un map nombre→estado legible de todos los procesos.
+func (st *StateTracker) Summary() map[string]string {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	out := make(map[string]string, len(st.processes))
+	for name, p := range st.processes {
+		out[name] = p.State.String()
+	}
+	return out
+}
+
+// RunningCount retorna la cantidad de procesos en estado Running.
+func (st *StateTracker) RunningCount() int {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	count := 0
+	for _, p := range st.processes {
+		if p.State == StateRunning {
+			count++
+		}
+	}
+	return count
+}
+
+// FailedCount retorna la cantidad de procesos en estado Failed.
+func (st *StateTracker) FailedCount() int {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	count := 0
+	for _, p := range st.processes {
+		if p.State == StateFailed {
+			count++
+		}
+	}
+	return count
+}
