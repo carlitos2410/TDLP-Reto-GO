@@ -1,0 +1,65 @@
+# Archivo de ejemplo para el supervisor.
+# Requiere compilar los ejemplos antes: ver README.md (sección "Compilar procesos de demo").
+# Define varios procesos hijos con políticas de reinicio y backoff.
+
+log_dir: logs
+
+# Defaults globales de backoff (cada proceso puede sobreescribirlos).
+backoff_defaults:
+  initial_seconds: 1
+  factor: 2
+  max_seconds: 30
+
+# 0 = reintentos ilimitados (hasta failed manual o señal de apagado).
+max_retries_default: 0
+
+# Segundos de gracia tras SIGTERM/SIGINT antes de SIGKILL a procesos hijos.
+grace_period_seconds: 10
+
+# API HTTP de consulta y control (GET status, POST start/stop/restart).
+api_listen: ":8080"
+
+processes:
+  - name: ticker
+    command: bin/ticker.exe
+    args: []
+    work_dir: .
+    env:
+      INTERVAL_SECONDS: "2"
+      WORKER_NAME: ticker
+    restart_policy: always
+    stdout_log: logs/ticker.stdout.log
+    stderr_log: logs/ticker.stderr.log
+
+  - name: greeter
+    command: bin/greeter.exe
+    args: []
+    work_dir: .
+    env:
+      GREETING: "Hola desde el supervisor"
+    restart_policy: always
+    stdout_log: logs/greeter.stdout.log
+    stderr_log: logs/greeter.stderr.log
+
+  - name: one-shot
+    command: bin/oneshot.exe
+    args: []
+    work_dir: .
+    restart_policy: never
+    stdout_log: logs/one-shot.stdout.log
+    stderr_log: logs/one-shot.stderr.log
+
+  - name: flaky
+    command: bin/flaky.exe
+    args: []
+    work_dir: .
+    env:
+      FAIL_MODE: "once"
+    restart_policy: on-failure
+    max_retries: 5
+    backoff:
+      initial_seconds: 2
+      factor: 2
+      max_seconds: 20
+    stdout_log: logs/flaky.stdout.log
+    stderr_log: logs/flaky.stderr.log
