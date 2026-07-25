@@ -124,3 +124,19 @@ func exitCode(err error) int {
 	}
 	return -1
 }
+
+func ensureLogDir(logPath string) error {
+	dir := filepath.Dir(logPath)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
+func buildEnv(extra map[string]string) []string {
+	env := os.Environ()
+	for key, value := range extra {
+		env = append(env, fmt.Sprintf("%s=%s", key, value))
+	}
+	return env
+}
