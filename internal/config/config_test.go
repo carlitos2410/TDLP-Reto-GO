@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadValidConfig(t *testing.T) {
@@ -157,5 +158,37 @@ func TestShouldRestartZeroRetriesUnlimited(t *testing.T) {
 		if !pc.ShouldRestart(i) {
 			t.Fatalf("ShouldRestart(%d) = false con MaxRetries=0 (ilimitado)", i)
 		}
+	}
+}
+
+func TestGracePeriodDurationDefault(t *testing.T) {
+	cfg := Config{}
+	got := cfg.GracePeriodDuration()
+	if got != 10*time.Second {
+		t.Fatalf("GracePeriodDuration() = %v, want 10s para config vacía", got)
+	}
+}
+
+func TestGracePeriodDurationExplicit(t *testing.T) {
+	cfg := Config{GracePeriodSeconds: 5}
+	got := cfg.GracePeriodDuration()
+	if got != 5*time.Second {
+		t.Fatalf("GracePeriodDuration() = %v, want 5s", got)
+	}
+}
+
+func TestGracePeriodDurationFractional(t *testing.T) {
+	cfg := Config{GracePeriodSeconds: 2.5}
+	got := cfg.GracePeriodDuration()
+	if got != 2500*time.Millisecond {
+		t.Fatalf("GracePeriodDuration() = %v, want 2.5s", got)
+	}
+}
+
+func TestGracePeriodDurationNegativeDefaultsTo10(t *testing.T) {
+	cfg := Config{GracePeriodSeconds: -1}
+	got := cfg.GracePeriodDuration()
+	if got != 10*time.Second {
+		t.Fatalf("GracePeriodDuration() = %v para negativo, want 10s (default)", got)
 	}
 }
