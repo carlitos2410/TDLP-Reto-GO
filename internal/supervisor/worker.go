@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"errors"
 	"log"
 	"sync"
 	"time"
@@ -11,157 +10,131 @@ import (
 	"supervisor-procesos/internal/process"
 )
 
-// Worker supervisa un único proceso hijo, aplica política de reinicio y backoff.
+// Worker administra el ciclo de vida de un proceso hijo supervisado.
 type Worker struct {
-	runner      *process.Runner
-	policy      config.RestartPolicy
-	backoff     *BackoffScheduler
-	maxRetries  int
+	cfg         config.ProcessConfig
 	gracePeriod time.Duration
+	runner      *process.Runner
+	backoff     *Backoff
+	tracker     *StateTracker
 
-	mu     sync.RWMutex
-	status ProcessStatus
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	lastErr error
 }
 
-// NewWorker crea un worker a partir de la configuración de un proceso.
-func NewWorker(cfg config.ProcessConfig, gracePeriod time.Duration) *Worker {
+// NewWorker crea un worker listo para gestionar el proceso descrito en la configuración.
+func NewWorker(cfg config.ProcessConfig, gracePeriod time.Duration, b *Backoff, tracker *StateTracker) *Worker {
+	tracker.Register(cfg.Name)
 	return &Worker{
-		runner:      process.NewRunner(cfg, gracePeriod),
-		policy:      cfg.RestartPolicy,
-		backoff:     NewBackoffScheduler(cfg.Backoff),
-		maxRetries:  cfg.MaxRetries,
+		cfg:         cfg,
 		gracePeriod: gracePeriod,
-		status: ProcessStatus{
-			Name:  cfg.Name,
-			State: StateStopped,
-		},
+		runner:      process.NewRunner(cfg, gracePeriod),
+		backoff:     b,
+		tracker:     tracker,
+		done:        make(chan struct{}),
 	}
 }
 
-// Name devuelve el nombre del proceso supervisado.
+// Name retorna el nombre del proceso gestionado por este worker.
 func (w *Worker) Name() string {
-	return w.runner.Name()
+	return w.cfg.Name
 }
 
-// Status devuelve una copia thread-safe del estado actual del proceso.
-func (w *Worker) Status() ProcessStatus {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.status
+// Start inicia el loop de supervisión del worker en una goroutine.
+// El loop ejecuta el proceso, y si termina con error según la política de reinicio,
+// aplica backoff y reintenta hasta agotar reintentos o cancelar el contexto principal.
+func (w *Worker) Start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	w.mu.Lock()
+	w.cancel = cancel
+	w.mu.Unlock()
+
+	go w.loop(ctx)
 }
 
-// Run ejecuta el ciclo de supervisión hasta stopped, failed o cancelación del contexto.
-func (w *Worker) Run(ctx context.Context) {
-	name := w.runner.Name()
+// Stop detiene el worker de forma ordenada.
+func (w *Worker) Stop() {
+	w.mu.Lock()
+	cancel := w.cancel
+	w.mu.Unlock()
 
-	for {
-		if err := ctx.Err(); err != nil {
-			w.setState(StateStopped)
-			log.Printf("[%s] supervisión detenida: %v", name, err)
-			return
-		}
-
-		w.setState(StateRunning)
-		log.Printf("[%s] arrancando: %s", name, w.runner.Config().Command)
-		result := w.runner.RunOnce(ctx)
-		w.setLastExitCode(result.ExitCode)
-
-		if errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded) {
-			w.setState(StateStopped)
-			log.Printf("[%s] ejecución cancelada por contexto", name)
-			return
-		}
-
-		success := result.ExitCode == 0 && result.Err == nil
-		if success {
-			w.backoff.OnSuccess()
-			w.resetConsecutiveFailures()
-			log.Printf("[%s] terminó correctamente (código=0)", name)
-		} else {
-			w.backoff.OnFailure()
-			failures := w.incrementConsecutiveFailures()
-			log.Printf("[%s] terminó con código=%d: %v", name, result.ExitCode, result.Err)
-
-			if w.maxRetries > 0 && failures > w.maxRetries {
-				w.setState(StateFailed)
-				log.Printf("[%s] estado failed: superó max_retries=%d", name, w.maxRetries)
-				return
-			}
-		}
-
-		if !shouldRestart(w.policy, result) {
-			w.setState(StateStopped)
-			log.Printf("[%s] no se reinicia (política=%s)", name, w.policy)
-			return
-		}
-
-		delay := w.backoff.Delay()
-		w.setState(StateBackoff)
-		log.Printf("[%s] backoff %s antes de reiniciar (política=%s)", name, delay, w.policy)
-
-		if !w.waitBackoff(ctx, delay) {
-			w.setState(StateStopped)
-			log.Printf("[%s] backoff interrumpido por contexto", name)
-			return
-		}
-
-		w.incrementRestartCount()
-		log.Printf("[%s] reiniciando tras backoff", name)
+	if cancel != nil {
+		cancel()
 	}
+	<-w.done
 }
 
-func (w *Worker) waitBackoff(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
-func (w *Worker) setState(state State) {
-	w.mu.Lock()
-	w.status.State = state
-	w.mu.Unlock()
-}
-
-func (w *Worker) setLastExitCode(code int) {
-	w.mu.Lock()
-	w.status.LastExitCode = code
-	w.mu.Unlock()
-}
-
-func (w *Worker) incrementRestartCount() {
-	w.mu.Lock()
-	w.status.RestartCount++
-	w.mu.Unlock()
-}
-
-func (w *Worker) incrementConsecutiveFailures() int {
+// LastErr retorna el último error registrado, o nil si no hubo errores.
+func (w *Worker) LastErr() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.status.ConsecutiveFailures++
-	return w.status.ConsecutiveFailures
+	return w.lastErr
 }
 
-func (w *Worker) resetConsecutiveFailures() {
-	w.mu.Lock()
-	w.status.ConsecutiveFailures = 0
-	w.mu.Unlock()
+// Status retorna la información actual del proceso desde el StateTracker.
+func (w *Worker) Status() ProcessInfo {
+	info, ok := w.tracker.Get(w.cfg.Name)
+	if !ok {
+		return ProcessInfo{Name: w.cfg.Name, State: StateIdle}
+	}
+	return info
 }
 
-func shouldRestart(policy config.RestartPolicy, result process.RunResult) bool {
-	switch policy {
-	case config.RestartAlways:
-		return true
-	case config.RestartOnFailure:
-		return result.ExitCode != 0
-	case config.RestartNever:
-		return false
-	default:
-		return false
+// Config retorna la configuración del proceso gestionado por este worker.
+func (w *Worker) Config() config.ProcessConfig {
+	return w.cfg
+}
+
+// loop es el ciclo de vida principal del worker.
+func (w *Worker) loop(ctx context.Context) {
+	defer close(w.done)
+
+	for {
+		w.tracker.SetState(w.cfg.Name, StateRunning)
+		log.Printf("[%s] iniciando proceso", w.cfg.Name)
+
+		result := w.runner.RunOnce(ctx)
+
+		w.mu.Lock()
+		w.lastErr = result.Err
+		w.mu.Unlock()
+
+		w.tracker.SetState(w.cfg.Name, StateIdle)
+		log.Printf("[%s] proceso terminó con exit code %d", w.cfg.Name, result.ExitCode)
+
+		if ctx.Err() != nil {
+			w.tracker.SetState(w.cfg.Name, StateStopped)
+			log.Printf("[%s] supervisor cancelado, deteniendo", w.cfg.Name)
+			return
+		}
+
+		if result.ExitCode == 0 && w.cfg.RestartPolicy == config.RestartOnFailure {
+			w.tracker.SetState(w.cfg.Name, StateStopped)
+			w.backoff.Reset(w.cfg.Name)
+			log.Printf("[%s] terminó exitosamente (on-failure), no se reinicia", w.cfg.Name)
+			return
+		}
+
+		if !w.cfg.ShouldRestart(w.backoff.CurrentAttempt(w.cfg.Name)) {
+			w.tracker.SetError(w.cfg.Name, result.Err, result.ExitCode)
+			log.Printf("[%s] sin reintentos restantes, marcado como fallido", w.cfg.Name)
+			return
+		}
+
+		w.tracker.IncrementRetries(w.cfg.Name)
+		waitDur := w.backoff.Next(w.cfg.Name)
+		w.tracker.SetState(w.cfg.Name, StateBackingOff)
+		log.Printf("[%s] reintento %d, esperando %v antes de reiniciar",
+			w.cfg.Name, w.backoff.CurrentAttempt(w.cfg.Name), waitDur)
+
+		select {
+		case <-ctx.Done():
+			w.tracker.SetState(w.cfg.Name, StateStopped)
+			log.Printf("[%s] supervisor cancelado durante backoff", w.cfg.Name)
+			return
+		case <-time.After(waitDur):
+		}
 	}
 }
