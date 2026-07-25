@@ -43,6 +43,7 @@ func TestShouldRestartPolicies(t *testing.T) {
 	}
 }
 
+
 func TestWorkerNeverRestartsAfterSuccess(t *testing.T) {
 	dir := t.TempDir()
 	command, args := testEchoCommand()
