@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -49,6 +50,18 @@ type ProcessInfo struct {
 	StartedAt    time.Time
 	StoppedAt    time.Time
 	Error        error
+}
+
+// String retorna una representación legible del ProcessInfo.
+func (pi ProcessInfo) String() string {
+	s := fmt.Sprintf("%s [%s] reintentos=%d", pi.Name, pi.State, pi.Retries)
+	if !pi.StartedAt.IsZero() {
+		s += fmt.Sprintf(" inicio=%s", pi.StartedAt.Format("15:04:05"))
+	}
+	if pi.Error != nil {
+		s += fmt.Sprintf(" error=%q", pi.Error.Error())
+	}
+	return s
 }
 
 // StateTracker mantiene el estado de todos los procesos supervisados.
