@@ -67,6 +67,11 @@ func (b BackoffConfig) Merge(other BackoffConfig) BackoffConfig {
 	return out
 }
 
+// String retorna una representación legible del BackoffConfig para logging.
+func (b BackoffConfig) String() string {
+	return fmt.Sprintf("backoff{initial=%vs, factor=%v, max=%vs}", b.InitialSeconds, b.Factor, b.MaxSeconds)
+}
+
 // Duration calcula el tiempo de espera para un intento dado (0-indexed).
 // Fórmula: min(initialSeconds * factor^attempt, maxSeconds).
 func (b BackoffConfig) Duration(attempt int) time.Duration {
